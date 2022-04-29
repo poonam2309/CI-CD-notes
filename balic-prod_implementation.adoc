@@ -1,0 +1,1442 @@
+////
+Purpose
+-------
+In the "Base" directory, this section is a placeholder which is to be
+overwritten by implementation details specific to the product or products being
+delivered.
+
+If "TODO" appears in your document after the init script has been run, then
+your product directory is missing a corresponding "implementation.adoc" which
+should be created to provide a basic implementation framework for that product.
+////
+
+:imagesdir: images
+
+== Create new namespace in Openshift
+
+  $oc new-project rhsso-prod
+
+==  Enable annotation on namespace for node selector
+  $oc annotate namespace rhsso-prod openshift.io/node-selector=node-role.kubernetes.io/worker=
+
+== Red Hat DataGrid Installation using Operator
+
+=== Login into Openshift Webconsole with admin privileges.
+
+Navigate to Menu-> operator hub ->Click on search->Search Red Hat Datagrid -> Install operator->approval strategy->automatic
+
+
+
+image::rhdg-operator.PNG[]
+
+=== Verify the Installed operator status
+
+image::datagrid-operator.PNG[]
+image::datagrid_install.png[]
+
+=== Create Infinispan cluster
+
+Navigate to Menu-> click Installed Operator-> Red Hat Data-grid->Infinispan Cluster -> Create infnispan -> create
+
+* Name: rhsso-infinispan
+* Labels: datagrid
+* Replicas: 3
+* Service Type: DataGrid
+* Autoscale
+* Max Mem Usage Percent: 70
+* Max Replicas: 3
+* Min Mem Usage Percent: 30
+* Min Replicas: 10
+
+image::datagrid-cluster.png[]
+
+=== Disable SSL security for http communication between RH SSO and RHDG.
+To disable the security between the RHSSO and RHDG add the endpointEncryption type to none in security spec.
+
+[source,yaml]
+----
+cat datagrid-inifispan.yaml
+apiVersion: infinispan.org/v1
+kind: Infinispan
+metadata:
+  name: rhsso-infinispan
+  namespace: rhsso-prod
+spec:
+  replicas: 3
+  security:
+    endpointEncryption:
+       type: None
+  service:
+    type: DataGrid
+----
+
+=== Create basic-auth for create caches.
+Extract the default created secret by operator and use its developer account for basic-auth secret.
+
+==== Get developer identities
+
+[source,yaml]
+----
+oc get secret rhsso-infinispan-generated-secret -o jsonpath="{.data.identities\.yaml}" | base64 --decode
+credentials:
+- username: developer
+ password: evrtn99pFxuvGvxv
+- username: operator
+ password: SxT3SahqhnhLwC83
+----
+==== Create basic-auth secret
+
+[source,yaml]
+----
+ocpadm# cat idenetities.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+ name: basic-auth
+ namespace: rhsso-prod
+type: Opaque
+spec:
+ data:
+   username: developer
+   password: evrtn99pFxuvGvxv
+----
+
+ oc apply -f idenetities.yaml
+  secret/basic-auth created
+
+
+=== Create Infinispan caches
+Add the below 7 caches using Cache API.
+
+**  clientSessions
+**  work
+**  offlineClientSessions
+**  default
+**  sessions
+**  actionTokens
+**  offlineSessions
+
+==== Work Cache
+
+*  Name: work
+*  Authentication info
+*   Secret Name: basic-auth
+*  Cluster Name: rhsso-infinispan
+*  Template Name: org.infinispan.REPL_SYNC
+
+image::work-cache.png[]
+
+==== Session Caches
+
+*  Name: sessions
+*  Authentication info
+*   Secret Name: basic-auth
+*  Cluster Name: rhsso-infinispan
+*  Template Name: org.infinispan.DIST_SYNC
+
+image::sessions-cache.png[]
+
+NOTE: Only work cache will be create replicated others will be distributed.
+
+All caches will be visulaized in the similar way.
+
+image::rhsso-caches.JPG[]
+
+
+=== Scale Up the Replicas of infinispan Using Webconsole
+
+Navigate to Installed Operators -> DataGrid -> Infinispan Cluster -> rhsso-infinispan -> Yaml
+
+Increase the number of replicas in spec.replicas: 3
+
+NOTE: take reference from below image.
+
+image::infinispan-replicas.PNG[]
+
+
+
+
+1) Login into one of the Red Hat Data Grid Pods
+
+ $oc rsh rhsso-infinispan-0
+
+Login into infinispan server using cli
+
+TIP: sh-4.4$ ./bin/cli.sh -c pod_ip:rhdg_port
+
+To get the list of caches using cli
+
+ sh-4.4$ ./bin/cli.sh -c 10.131.0.28:11222
+ [rhsso-infinispan-0-24317@infinispan//containers/default]> ls caches
+    loginFailures
+    ___script_cache
+    ___protobuf_metadata
+    clientSessions
+    work
+    offlineClientSessions
+    default
+    sessions
+    actionTokens
+    offlineSessions
+
+NOTE: We do not need to create the caches in every pod as every pod is in cluster mode so one pod will replicate the all caches among all 3 pods.
+
+
+== Red Hat SSO deployment and integration With RHDG
+
+=== Verify image in openshift namespace
+
+ $oc get is sso74-openshift-rhel8  -n openshift
+     NAME                    IMAGE REPOSITORY                                                                   TAGS      UPDATED
+     sso74-openshift-rhel8   image-registry.openshift-image-registry.svc:5000/openshift/sso74-openshift-rhel8   latest    43 seconds ago
+
+=== Verify the template in Openshift Namespace
+
+  $ oc get templates -n openshift | grep sso
+
+=== Create new-app using the below templates
+
+  $ oc new-app --template=sso74-ocp4-x509-https -p SSO_ADMIN_USERNAME="Username" -p SSO_ADMIN_PASSWORD="******"
+
+=== Verify the output.
+
+   Output:
+    --> Deploying template "openshift/sso74-ocp4-x509-https" to project rhsso-prod
+      Red Hat Single Sign-On 7.4 on OpenJDK (Ephemeral with reencrypt TLS)
+      ---------
+        A new RH-SSO service has been created in your project. The admin username/password for accessing the master realm via the RH-SSO console is username/******.
+     * With parameters:
+  --> Creating resources ...
+   service "sso" created
+   service "secure-sso" created
+   service "sso-ping" created
+   route.route.openshift.io "sso" created
+   route.route.openshift.io "secure-sso" created
+   deploymentconfig.apps.openshift.io "sso" created
+  --> Success
+   Access your application via route 'sso-rhsso-prod.apps.ocplife-np.bajajallianz.com'
+   Access your application via route 'sso-rhsso-prod.apps.ocplife.bajajallianz.com'
+   Run 'oc status' to view your app.
+
+
+=== Login into RHSSO appliction
+
+   Get the route name from below command.
+
+    $oc get route
+    NAME          HOST/PORT
+    sso    sso-rhsso-prod.apps.ocplife-np.bajajallianz.com
+
+   Copy route url into browser and login with the credentials given while deploying app.
+
+   * RH-SSO Administrator Username: username
+   * RH-SSO Administrator Password: password
+
+
+=== Create RHSSO configuration for datasource, caches and
+==== RHDG connectivity using cli commands.
+Create a new file rhsso_rhdg/sso-extensions.cli file in this directory with the following contents. Update the values of the variables such as DB_JDBC_URL and Remote-cache host (host=rhsso-infinispan) according to the deployment needs.
+
+[source,yaml]
+----
+ $ cat sso-extensions.cli
+    batch
+    set DB_DRIVER_NAME=postgresql
+    set DB_USERNAME=*******
+    set DB_PASSWORD=******
+    set DB_DRIVER=org.postgresql.Driver
+    set DB_XA_DRIVER=org.postgresql.xa.PGXADataSource
+    set DB_JDBC_URL="jdbc:postgresql://*.*.*.*:5432/rhssodb"
+    set DB_EAP_MODULE=org.postgresql
+    /subsystem=datasources/data-source=KeycloakDS:remove()
+    /subsystem=datasources/data-source=KeycloakDS:add( \
+    jndi-name=java:jboss/datasources/KeycloakDS, \
+    enabled=true, \
+    use-java-context=true, \
+    connection-url=$DB_JDBC_URL, \
+    driver-name=$DB_DRIVER_NAME, \
+    user-name=$DB_USERNAME, \
+    password=$DB_PASSWORD \
+    )
+    /subsystem=datasources/data-source=KeycloakDS:write-attribute(name=min-pool-size,value=2)
+    /subsystem=datasources/data-source=KeycloakDS:write-attribute(name=max-pool-size,value=10)
+    /subsystem=datasources/data-source=KeycloakDS:write-attribute(name=valid-connection-checker-class-name,value=org.jboss.jca.adapters.jdbc.extensions.postgres.PostgreSQLValidConnectionChecker)
+    /subsystem=datasources/data-source=KeycloakDS:write-attribute(name=validate-on-match,value=true)
+    /subsystem=datasources/data-source=KeycloakDS:write-attribute(name=exception-sorter-class-name,value=org.jboss.jca.adapters.jdbc.extensions.postgres.PostgreSQLExceptionSorter)
+    /subsystem=datasources/data-source=KeycloakDS:write-attribute(name=new-connection-sql,value=select 1)
+    /subsystem=infinispan/cache-container=keycloak:write-attribute(name=module,value=org.keycloak.keycloak-model-infinispan)
+    /socket-binding-group=standard-sockets/remote-destination-outbound-socket-binding=remote-cache/:add(host=rhsso-infinispan,port=${remote.cache.port:11222},fixed-source-port=true)
+    /subsystem=infinispan/cache-container=keycloak/replicated-cache=work/store=remote:add(cache=work,remote-servers=[remote-cache],fetch-state=false,passivation=false,preload=false,purge=false,shared=true,properties={rawValues=true,marshaller=org.keycloak.cluster.infinispan.KeycloakHotRodMarshallerFactory,infinispan.client.hotrod.auth_username=developer,infinispan.client.hotrod.auth_password=FjK5lPMWOQp83jXL,infinispan.client.hotrod.use_ssl=false,infinispan.client.hotrod.auth_realm=default,infinispan.client.hotrod.auth_server_name=infinispan})
+    /subsystem=infinispan/cache-container=keycloak/distributed-cache=offlineSessions/store=remote:add(cache=offlineSessions,remote-servers=[remote-cache],fetch-state=false,passivation=false,preload=false,purge=false,shared=true,properties={rawValues=true,marshaller=org.keycloak.cluster.infinispan.KeycloakHotRodMarshallerFactory,infinispan.client.hotrod.auth_username=developer,infinispan.client.hotrod.auth_password=FjK5lPMWOQp83jXL,infinispan.client.hotrod.use_ssl=false,infinispan.client.hotrod.auth_realm=default,infinispan.client.hotrod.auth_server_name=infinispan})
+    /subsystem=infinispan/cache-container=keycloak/distributed-cache=sessions/store=remote:add(cache=sessions,remote-servers=[remote-cache],fetch-state=false,passivation=false,preload=false,purge=false,shared=true,properties={rawValues=true,marshaller=org.keycloak.cluster.infinispan.KeycloakHotRodMarshallerFactory,infinispan.client.hotrod.auth_username=developer,infinispan.client.hotrod.auth_password=FjK5lPMWOQp83jXL,infinispan.client.hotrod.use_ssl=false,infinispan.client.hotrod.auth_realm=default,infinispan.client.hotrod.auth_server_name=infinispan})
+    /subsystem=infinispan/cache-container=keycloak/distributed-cache=clientSessions/store=remote:add(cache=clientSessions,remote-servers=[remote-cache],fetch-state=false,passivation=false,preload=false,purge=false,shared=true,properties={rawValues=true,marshaller=org.keycloak.cluster.infinispan.KeycloakHotRodMarshallerFactory,infinispan.client.hotrod.auth_username=developer,infinispan.client.hotrod.auth_password=FjK5lPMWOQp83jXL,infinispan.client.hotrod.use_ssl=false,infinispan.client.hotrod.auth_realm=default,infinispan.client.hotrod.auth_server_name=infinispan})
+    /subsystem=infinispan/cache-container=keycloak/distributed-cache=offlineClientSessions/store=remote:add(cache=offlineClientSessions,remote-servers=[remote-cache],fetch-state=false,passivation=false,preload=false,purge=false,shared=true,properties={rawValues=true,marshaller=org.keycloak.cluster.infinispan.KeycloakHotRodMarshallerFactory,infinispan.client.hotrod.auth_username=developer,infinispan.client.hotrod.auth_password=FjK5lPMWOQp83jXL,infinispan.client.hotrod.use_ssl=false,infinispan.client.hotrod.auth_realm=default,infinispan.client.hotrod.auth_server_name=infinispan})
+    /subsystem=infinispan/cache-container=keycloak/distributed-cache=loginFailures/store=remote:add(cache=loginFailures,remote-servers=[remote-cache],fetch-state=false,passivation=false,preload=false,purge=false,shared=true,properties={rawValues=true,marshaller=org.keycloak.cluster.infinispan.KeycloakHotRodMarshallerFactory,infinispan.client.hotrod.auth_username=developer,infinispan.client.hotrod.auth_password=FjK5lPMWOQp83jXL,infinispan.client.hotrod.use_ssl=false,infinispan.client.hotrod.auth_realm=default,infinispan.client.hotrod.auth_server_name=infinispan})
+    /subsystem=infinispan/cache-container=keycloak/distributed-cache=actionTokens/store=remote:add(cache=actionTokens,remote-servers=[remote-cache],fetch-state=false,passivation=false,preload=false,purge=false,shared=true,properties={rawValues=true,marshaller=org.keycloak.cluster.infinispan.KeycloakHotRodMarshallerFactory,infinispan.client.hotrod.auth_username=developer,infinispan.client.hotrod.auth_password=FjK5lPMWOQp83jXL,infinispan.client.hotrod.use_ssl=false,infinispan.client.hotrod.auth_realm=default,infinispan.client.hotrod.auth_server_name=infinispan})
+    run-batch
+----
+
+==== Create a new configmap using this cli file.
+
+Instead of creating the docker image using configmap for realtime change will visualize on the fly. To change into docker image everytime backup of exiting config.cli and other files need to be exist whereas using configmap backup of exiting files can be taken from the configmap and recreation is easy.
+
+  ocpadm@ip-172-20-35-122 rhsso-rhdg]$ oc create configmap rhsso-config --from-file=extensions/sso-extensions.cli
+  configmap/rhsso-config created
+
+NOTE: This extention cli file name should not be change as it is predefined into RH SSO image.
+
+==== Map configmap as a volume in RH SSO deploymentConfig.
+
+  oc set volume dc/sso --add --name=rhsso-config -m /opt/eap/extensions -t configmap --configmap-name=rhsso-config --default-mode='0755' --overwrite
+
+==== Verify the pod logs for extensions cli execution.
+Below output will display in sso pod logs.
+
+[source,text]
+----
+[standalone@embedded / #] run-batch
+The batch executed successfully
+----
+
+=== Identify the name of the route for the Red Hat Single Sign-On service.
+ $oc get route
+ NAME          HOST/PORT
+ sso    sso-rhsso-prod.apps.ocplife-np.bajajallianz.com
+
+
+===  User federation to import users from RHDS
+
+* Display Name: RHDS
+* Priority: 1
+* Import Users: optional (if do not want to import users in rhsso db)
+* Edit Mode: Writable (for add users into RHDS)
+* User Object Classes: Schema class (User attribute class)
+* ConnectionUrl: RHDS server url with PORT
+* Use DN: User OU name for importing Users
+* Bind DN: RHDS credentials for accessing the RHDS.
+* Bind Credentials: Password
+* Sync settings: Next time sync time for full sync or changed user sync.
+
+image::rhds-1.JPG[]
+image::rhds-2.JPG[]
+image::rhds-3.JPG[]
+image::rhds-4.JPG[]
+
+
+=== Configure Kerberos with RH SSO
+To configure the Kerberos integration with RH SSO follow below steps:
+
+==== Add realm name and kdc name into Kerberos configuration file.
+
+* Copy the existing krb5.conf file from pod to local machine.
+
+   $oc exec sso-26-g4gpx cp /etc/krb5.conf krb5.conf
+
+* Add Kerbros properties in krb5.conf file.
+
+[source,yaml]
+----
+ cat krb5.conf
+    # To opt out of the system crypto-policies configuration of krb5, remove the
+    # symlink at /etc/krb5.conf.d/crypto-policies which will not be recreated.
+    [libdefaults]
+        default_realm = BAJAJALLIANZ.IN
+        default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes256-cts aes128-cts-hmac-sha1-96 aes128-cts rc4-hmac des3-cbc-sha1 des-cbc-md5 des-cbc-crc arcfour-hmac-md5 arcfour-hmac
+        default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes256-cts aes128-cts-hmac-sha1-96 aes128-cts rc4-hmac des3-cbc-sha1 des-cbc-md5 des-cbc-crc arcfour-hmac-md5 arcfour-hmac
+        permitted_enctypes   = aes256-cts-hmac-sha1-96 aes256-cts aes128-cts-hmac-sha1-96 caes128-cts rc4-hmac des3-cbc-sha1 des-cbc-md5 des-cbc-crcarcfour-hmac-md5 arcfour-hmac
+        dns_lookup_realm = false
+        dns_lookup_kdc = false
+        dns_canonicalize_hostname = false
+        ignore_acceptor_hostname = true
+        forwardable = true
+        default_ccache_name = KEYRING:persistent:%{uid}
+    [realms]
+     BAJAJALLIANZ.IN = {
+         kdc = l7srw2adc01.bajajallianz.in
+         admin_server = l7srw2adc01.bajajallianz.in
+     }
+
+    [domain_realm]
+     .bajajallianz.in = BAJAJALLIANZ.IN
+     bajajallianz.in = BAJAJALLIANZ.IN
+----
+
+
+
+==== Add the Kerberos config file into existing configmap.
+
+Alternate 1. Edit exting configmap and add the krb5.conf: key into data tag.
+
+ $oc edit configmap rhsso-config
+
+
+Add the krb5.conf file into data property
+
+[source,yaml]
+----
+ data:
+   krb5.conf: |
+     # To opt out of the system crypto-policies configuration of krb5, remove the
+     # symlink at /etc/krb5.conf.d/crypto-policies which will not be recreated.
+     [libdefaults]
+         default_realm = BAJAJALLIANZ.IN
+         default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes256-cts aes128-cts-hmac-sha1-96 aes128-cts rc4-hmac des3-cbc-sha1 des-cbc-md5 des-cbc-crc arcfour-hmac-md5 arcfour-hmac
+         default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes256-cts aes128-cts-hmac-sha1-96 aes128-cts rc4-hmac des3-cbc-sha1 des-cbc-md5 des-cbc-crc arcfour-hmac-md5 arcfour-hmac
+         permitted_enctypes   = aes256-cts-hmac-sha1-96 aes256-cts aes128-cts-hmac-sha1-96 caes128-cts rc4-hmac des3-cbc-sha1 des-cbc-md5 des-cbc-crcarcfour-hmac-md5 arcfour-hmac
+         dns_lookup_realm = false
+         dns_lookup_kdc = false
+         dns_canonicalize_hostname = false
+         ignore_acceptor_hostname = true
+         forwardable = true
+         default_ccache_name = KEYRING:persistent:%{uid}
+     [realms]
+      BAJAJALLIANZ.IN = {
+          kdc = l7srw2adc01.bajajallianz.in
+          admin_server = l7srw2adc01.bajajallianz.in
+      }
+
+     [domain_realm]
+      .bajajallianz.in = BAJAJALLIANZ.IN
+      bajajallianz.in = BAJAJALLIANZ.IN
+
+----
+
+Alternate 2. Create new configmap
+
+* Take the backup of exiting sso-extensions.cli from the configmap and create a file sso-extension.cli.
+* Create a new directory extensions in bastion machine
+* Copy the cli file into extensions directory.
+* Copy the krb5.conf file into extensions directory.
+* Recreate the configmap with both files together.
+
+   ocpadm@ip-172-20-35-122 rhsso-rhdg]$ oc create configmap rhsso-config --from-file=extensions/
+   configmap/rhsso-config created
+
+NOTE: Config will copy the both files into data tag after using the directory in configmap from-file option.
+
+==== Map the keytab file into RH SSO pods.
+* Create a new secret to load the keytab file into RH SSO pods.
+
+  ocpadm@ip-172-20-35-122 rhsso-rhdg]$ oc create secret generic keytab-file-secret --from-file=rhssoprod1.keytab
+  secret/keytab-file-secret created
+
+
+* Map the secret a volume into deploymentConfig.
+
+  ocpadm@ip-172-20-35-122 rhsso-rhdg]$ oc set volume dc/sso --add --name=keytab-file-secret -m /opt/keytab -t secret --secret-name=keytab-file-secret--default-mode='0755'
+  deploymentconfig.apps.openshift.io/sso volume updated
+
+==== Set the kerberos property into RH SSO standalone-openshift.xml file using jboss- cli.
+
+* Edit configmap and add the kerberos configuration property into sso-extensions.cli key before run-batch.
+
+
+   $oc edit configmap rhsso-config
+
+[source,yaml]
+----
+ sso-extensions.cli: |+
+   batch
+   set DB_DRIVER_NAME=postgresql
+   ..............
+   ....................
+   /system-property=java.security.krb5.conf:add(value=/opt/eap/extensions/krb5.conf)
+   run-batch
+
+kind: ConfigMap
+----
+
+NOTE: To reflect the real time changes of configmap recreate the all RH SSO pods again.
+
+==== Create the user federation to import users from AD
+
+To create User Federation the following points are mendatory.
+
+ * Display Name: AD-RODC
+ * Priority: 0
+ * Import Users: optional (if do not want to import users in rhsso db)
+ * Edit Mode: Readonly (for no changes into AD database)
+ * User Object Classes: Schema class (User attribute class)
+ * ConnectionUrl: AD server url with PORT
+ * Use DN: User OU name for importing Users
+ * Bind DN: Ad credentials for accessing the AD.
+ * Bind Credentials: Password
+ * Sync settings: Next time sync time for full sync or changed user sync.
+
+
+image::userfederation.PNG[]
+
+
+==== Create Group Mapper in RHDS user Federation
+
+Group mappers are used to create user and group membership which is imported from AD into RHSSO. To create group mapper below steps are defined.
+
+ * LDAP Group DN: list of ou's which are defined as groups of users in AD.
+ * Group Name Ldap attribute: cn
+ * Memeber LDAP attribute: member that is used to store users into Group OU.
+ * LDAP filter: For specific group import
+ * Mode: readonly (it will read users group membership from AD)
+ * User Groups Retrieve Strategy: Get users from member attribute which is defined into USER class.
+ * Member-Of LDAP Attribute: It is user role retrieve strategy defind in User schema.
+ * Finally: Sync ldap group to Keycloak
+
+
+image::openshift-mapper.PNG[]
+
+
+==== Verify the imported Users in RHSSO
+
+Navigate to Users -> View all Users
+
+image::users.PNG[]
+
+==== Verify the Groups in RHSSO
+
+To verify the imported groups in RHSSO
+
+Navigate to Groups -> View all Groups
+
+image::groups.PNG[]
+
+
+==== Add Kerberos configuration in ldap user federation.
+Below configuration need to be done in Kerberos integration.
+
+1) Allow Kerberos authentication: ON
+
+2) Kerberos Realm: BAJAJALLIANZ.IN
+
+3) Server Principal: HTTP/sso-rhsso-prod.apps.ocplife.bajajallianz.com@BAJAJALLIANZ.IN
+
+4) keytab: /opt/keytab/rhssoprod1.keytab
+
+5) Use Kerberos for password authentication: ON
+
+NOTE: (Use Kerberos for password authentication is optional. If every user is Kerberos authenticated then enable it otherwise disable it)
+
+image::ldap-federation.png[]
+==== ldap Username Mapper
+Replace LDAP attribute from cn to SamAccountName username mapper because kerberos identifies the username without space (rhsso.admin).
+
+LDAP attribute:  SamAccountName
+
+image::username-mapper.png[]
+
+==== ldap  Group mapper
+In Group mapper change the Memebership User LDAP Attribute for users group mapping.
+
+Memebership User LDAP Attribute:  SamAccountName
+
+image::group-mapper.png[]
+
+=== Application testing in AD client machine
+Add kerberos configuration in every browser to trust the local intranet and websites.
+
+==== Mozilla Firefox
+1) Open the low level Firefox configuration page by loading the about:config page.
+
+2) In the Search text box, enter: network.negotiate-auth.trusted-uris
+
+3) Double-click the network.negotiate-auth.trusted-uris preference and enter the sso url https://sso-rhsso-prod.apps.ocplife.bajajallianz.com.
+
+4) Click Ok.
+
+==== Internet Explorer
+
+Follow the steps below to configure Internet Explorer.
+
+1) Configuring the Local Intranet Domain
+
+2) Open Internet Explorer and click the Settings gear icon in the top-right corner. Select Internet options.
+
+3) Select the Security tab.
+
+4) Select the Local Intranet zone and click the Sites button.
+
+5) Make sure that the first two options, Include all local (intranet) sites not listed in other zones and Include all sites that bypass the proxy server are checked.
+
+6) Click Advanced and add the names of the domains that are protected by Kerberos HTTP SPNEGO, one at a time, to the list of websites. For example,https://sso-rhsso-prod.apps.ocplife.bajajallianz.com  Click Close.
+
+7) Click OK to save your configuration changes.
+
+===== Configuring Intranet Authentication
+1) Click the Settings gear icon in the top-right corner. Select Internet options.
+
+2) Select the Security tab.
+
+3) Select the Local Intranet zone and click the Custom level... button to open the Security Settings - Local Intranet Zone dialog box.
+
+4) Scroll down to the User Authentication options and select Automatic logon only in Intranet zone.
+
+5) Click OK to save these changes.
+
+===== Google Chrome
+For Windows:
+Open the Control Panel to access the Internet Options dialog. Use the same configuration as detailed in Configuration changes required are the same as those described above for Internet Explorer.
+
+=== Horizontal pod Scaling for RH SSO pods
+Add the resources limits and requests parameters into sso deployment config.
+
+  ocpadm@ip-172-20-35-122 rhsso-rhdg]$ oc edit dc sso
+  deploymentconfig.apps.openshift.io/sso edited
+
+[source,yaml]
+----
+resources:
+         requests:
+           memory: 500Mi
+           cpu: 500m
+         limits:
+           memory: 1Gi
+           cpu: 1
+----
+
+Autoscale the sso pods based on cpu-percent.
+
+  oc autoscale dc/sso --min=2 --max=4 --cpu-percent=70
+
+
+
+== Openshift Authentication with RHSSO
+
+To authenticate Openshift with RHSSO need the following details.
+
+ 1) Users from RHSSO realm.
+ 2) RHSSO Openshift client which will authenticate the Openshift cluster login users.
+ 3) Groups from openshift to validate users.
+ 4) Policy from openshift to restrict user roles.
+
+=== Create secret for RHSSO credentials
+
+Copy secret from credentials which is available in Openshift realm and create secret for OAuth.
+
+image::client-credentials.PNG[]
+
+Create secret in openshift from copied credentials which will be used by openshift client authentication.
+
+ $oc create secret generic ssoauth-secret --from-literal=clientSecret=7ddbd3a5-0611-4abb-bca6-a73f18b2a8a1 -n openshift-config
+
+=== Create client in openshift namespace
+
+Navigate to Clients-> new client
+
+ * ClientID: openshift-auth (client name)
+ * Name: Openshift Authentication
+ * Client protocol: openid-connect
+ * Access protocol: confidential
+ * Root url: openshift console url
+ * Valid Redirect url: auth2callback url
+
+image::openshift-client.PNG[]
+
+
+
+=== Edit OAuth in Openshift-authentication namespace
+
+Add oauth identityProviders in Openshift-authentication namespace oauth kind. Below configuration starts from mapping method will be added into OAuth kind.
+
+[source,yaml]
+----
+ - mappingMethod: claim
+    name: ssoauth
+    ....
+    ....
+    type: OpenID
+
+----
+
+[source,yaml]
+
+----
+$oc edit oauth cluster -n openshift-authentication
+
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+annotations:
+  kubectl.kubernetes.io/last-applied-configuration:
+    {"apiVersion":"config.openshift.io/v1","kind":"OAuth","metadata":{"annotations":{},"name":"cluster"},"spec":{"identityProviders":[{"htpasswd":{"fileData":{"name":"htpass-secret"}},"mappingMethod":"claim","name":"htpasswd_provider","type":"HTPasswd"}]}}
+  release.openshift.io/create-only: 'true'
+creationTimestamp: '2020-05-20T10:57:40Z'
+generation: 2
+name: cluster
+resourceVersion: '348966'
+selfLink: /apis/config.openshift.io/v1/oauths/cluster
+uid: 5ed0157b-a5e8-4ba7-aedd-dc63d668ce31
+spec:
+identityProviders:
+  - htpasswd:
+      fileData:
+        name: htpass-secret
+    mappingMethod: claim
+    name: htpasswd_provider
+    type: HTPasswd
+  - mappingMethod: claim
+    name: ssoauth
+    openID:
+      claims:
+        email:
+        - email
+        name:
+        - given_name
+        - name
+        preferredUsername:
+        - preferred_username
+        - email
+      clientID: openshift-oauth
+      clientSecret:
+        name: ssoauth-secret
+      extraAuthorizeParameters:
+        include_granted_scopes: "true"
+      extraScopes:
+      - email
+      - profile
+      issuer: https://sso-rhsso-prod.apps.ocplife.bajajallianz.com/auth/realms/openshift
+    type: OpenID
+
+----
+
+TIP: To Verify the issuer in rhsso use the curl
+  $curl -k https://sso-rhsso-prod.apps.ocplife.bajajallianz.com/auth/realms/openshift/.well-known/openid-configuration
+
+TIP: Output will appear like this:
+  {"issuer":"https://sso-rhsso-prod.apps.ocplife.bajajallianz.com/auth/realms/openshift" ......}
+
+
+== RHDS master-master replication
+
+=== RHDS1 Master-Master Replication over Secure port(636)
+
+For initial configuration need to subscribe the both VM with Red Hat subscription account.
+
+=== Subscribe the VM with Red Hat subscription Account
+
+=== list all subscription
+
+List all subscriptions and verify the Developer Subscription name.
+
+      subscription-manager list --available --all
+      Subscription Name:   Red Hat Enterprise Linux Developer Suite
+      Provides:            ...
+                          Red Hat Directory Server
+                          ...
+      Pool ID:             5ab6a8df96b03fd30aba9a9c58da57a1
+      Available:           1
+
+
+=== Attach pool id
+
+Attach the subscription-manager with Developer subscription pool id.
+
+ $ subscription-manager attach --pool=5ab6a8df96b03fd30aba9a9c58da57a1
+    Successfully attached a subscription for: Red Hat Enterprise Linux Developer.
+
+=== Enable the repository.
+
+Enable the dirsrv-11-for-rhel-8-x86_64-rpms repository:
+
+  $ subscription-manager repos --enable=dirsrv-11-for-rhel-8-x86_64-rpms
+    Repository 'dirsrv-11-for-rhel-8-x86_64-rpms' is enabled for this system.
+
+=== Install the Red Hat-ds:11 module in both Servers:
+
+Before start installation update the VM's.
+
+ $ yum update
+
+Install the rhds-module
+
+ $ yum module install Red Hat-ds:11
+
+
+
+For interactive installer, we need to set the following settings:
+
+    * Host name of the system
+    * Name of the instance
+    * LDAP port number
+    * DN of the directory manager account
+    * Password of the directory manager account
+    * Optional creation of a database suffix
+
+=== Master node 1 configuration
+
+[source,text]
+----
+    ocpadm@L7SRL2RHDS01 ~]$ sudo dscreate interactive
+    [sudo] password for ocpadm:
+    Install Directory Server (interactive mode)
+    ===========================================
+
+    Enter system's hostname [L7SRL2RHDS01]:
+
+    Enter the instance name [L7SRL2RHDS01]: rhds
+
+    Enter port number [389]:
+
+    Create self-signed certificate database [yes]: no
+
+    Enter Directory Manager DN [cn=rhdsadmin]: cn=rhdsadmin
+
+    Enter the Directory Manager password:
+    Confirm the Directory Manager Password:
+
+    Enter the database suffix (or enter "none" to skip) [dc=L7SRL2RHDS01]: none
+
+    Do you want to start the instance after the installation? [yes]: yes
+
+    Are you ready to install? [no]: yes
+    Starting installation...
+    Completed installation for rhds
+----
+==== Create Root suffix for RHDS
+
+  ocpadm@L7SRL2RHDS01 dirsrv]$ dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS01 backend create --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" --be-name="rhdsextprod"
+  Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS01:
+  The database was sucessfully created
+
+=== Master node2 configuration
+
+[source,text]
+----
+    ocpadm@L7SRL2RHDS02 ~]$ sudo dscreate interactive
+    [sudo] password for ocpadm:
+    Install Directory Server (interactive mode)
+    ===========================================
+
+    Enter system's hostname [L7SRL2RHDS02]:
+
+    Enter the instance name [L7SRL2RHDS02]: rhds
+
+    Enter port number [389]:
+
+    Create self-signed certificate database [yes]: no
+
+    Enter Directory Manager DN [cn=rhdsadmin]: cn=rhdsadmin
+
+    Enter the Directory Manager password:
+    Confirm the Directory Manager Password:
+
+    Enter the database suffix (or enter "none" to skip) [dc=L7SRL2RHDS02]: none
+
+    Do you want to start the instance after the installation? [yes]: yes
+
+    Are you ready to install? [no]: yes
+    Starting installation...
+    Completed installation for rhds
+----
+==== Create root suffix for RHDS
+
+    ocpadm@L7SRL2RHDS02 ~]$ dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS02 backend create --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" --be-name="rhdsextprod"
+    Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS02:
+    The database was sucessfully created
+
+==== Verify the service status:
+
+  ocpadm@L7SRL2RHDS02 ~]$ sudo systemctl status dirsrv@rhds
+  ● dirsrv@rhds.service - 389 Directory Server rhds.
+     Loaded: loaded (/usr/lib/systemd/system/dirsrv@.service; enabled; vendor preset: disabled)
+    Drop-In: /usr/lib/systemd/system/dirsrv@.service.d
+             └─custom.conf
+     Active: active (running) since Thu 2021-03-25 13:47:49 IST; 2h 32min ago
+   Main PID: 10737 (ns-slapd)
+     Status: "slapd started: Ready to process requests"
+      Tasks: 24 (limit: 23536)
+     Memory: 50.4M
+     CGroup: /system.slice/system-dirsrv.slice/dirsrv@rhds.service
+             └─10737 /usr/sbin/ns-slapd -D /etc/dirsrv/slapd-rhds -i /run/dirsrv/slapd-rhds.pid
+
+
+
+=== Create root certificates for SSL verification
+==== Create Root Key
+this is the key used to sign the certificate requests, anyone holding this can sign certificates on your behalf.
+
+ $ openssl genrsa -des3 -out rootCA.key 4096
+
+==== Create and self sign the Root Certificate
+
+Here we used our root key to create the root certificate that needs to be distributed in all the servers that have to trust us.
+
+
+  [ocpadm@L7SRL2RHDS01 SSLCerts]$ openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 3650 -out rootCA.crt
+  Enter pass phrase for rootCA.key:
+  You are about to be asked to enter information that will be incorporated
+  into your certificate request.
+  What you are about to enter is what is called a Distinguished Name or a DN.
+  There are quite a few fields but you can leave some blank
+  For some fields there will be a default value,
+  If you enter '.', the field will be left blank.
+  -----
+  Country Name (2 letter code) [XX]:IN
+  State or Province Name (full name) []:Maharastra
+  Locality Name (eg, city) [Default City]:Mumbai
+  Organization Name (eg, company) [Default Company Ltd]:Bajaj Allianz
+  Organizational Unit Name (eg, section) []:IT
+  Common Name (eg, your name or your server's hostname) []:L7SRL2RHDS01
+  Email Address []:admin@balic.in
+
+==== Create RHDS tls certificates
+
+==== Create the certificate key
+
+ $ openssl genrsa -out rhds1.key 2048
+
+==== Create the signing (csr)
+
+  [ocpadm@L7SRL2RHDS01 SSLCerts]$ openssl req -new -key rhds1.key -out rhds1.csr
+  You are about to be asked to enter information that will be incorporated
+  into your certificate request.
+  What you are about to enter is what is called a Distinguished Name or a DN.
+  There are quite a few fields but you can leave some blank
+  For some fields there will be a default value,
+  If you enter '.', the field will be left blank.
+  -----
+  Country Name (2 letter code) [XX]:IN
+  State or Province Name (full name) []:Maharashtra
+  Locality Name (eg, city) [Default City]:Mumbai
+  Organization Name (eg, company) [Default Company Ltd]:Bajaj Allianz PVT LTD
+  Organizational Unit Name (eg, section) []:IT
+  Common Name (eg, your name or your server's hostname) []:L7SRL2RHDS01.bajajallianzlife.com
+  Email Address []:admin1@gmail.com
+  Please enter the following 'extra' attributes
+  to be sent with your certificate request
+  A challenge password []:redhat
+  An optional company name []:
+
+==== Generate the certificate using the rhds csr and key along with the CA Root key
+
+
+  [ocpadm@L7SRL2RHDS01 SSLCerts]$ openssl x509 -req -in rhds1.csr -CA rootCA.crt -CAkey rootCA.key -CAcreateserial -out rhds1.crt -days 3650 -sha256Signature ok
+  subject=C = IN, ST = Maharashtra, L = Mumbai, O = Bajaj Allianz PVT LTD, OU = IT, CN = L7SRL2RHDS01, emailAddress = admin1@gmail.com
+  Getting CA Private Key
+  Enter pass phrase for rootCA.key:
+
+
+==== verify certificates content
+
+    openssl req -in rhds1.csr -noout -text
+
+==== Create RHDS tls certificates for Node 2
+
+==== Create the certificate key
+
+ $openssl genrsa -out rhds2.key 2048
+
+==== Create the signing (csr)
+
+  [ocpadm@L7SRL2RHDS01 SSLCerts]$ openssl req -new -key rhds2.key -out rhds2.csr
+  You are about to be asked to enter information that will be incorporated
+  into your certificate request.
+  What you are about to enter is what is called a Distinguished Name or a DN.
+  There are quite a few fields but you can leave some blank
+  For some fields there will be a default value,
+  If you enter '.', the field will be left blank.
+  -----
+  Country Name (2 letter code) [XX]:IN
+  State or Province Name (full name) []:Maharashtra
+  Locality Name (eg, city) [Default City]:Pune
+  Organization Name (eg, company) [Default Company Ltd]:Bajaj Allianz PVT LTD
+  Organizational Unit Name (eg, section) []:IT
+  Common Name (eg, your name or your server's hostname) []:L7SRL2RHDS02.bajajallianzlife.com
+  Email Address []:admin2@balic.in
+
+  Please enter the following 'extra' attributes
+  to be sent with your certificate request
+  A challenge password []:redhat
+  An optional company name []:
+
+==== Generate the certificate using the RHDS csr and key along with the CA Root key
+
+  [ocpadm@L7SRL2RHDS01 SSLCerts]$ openssl x509 -req -in rhds2.csr -CA rootCA.crt -CAkey rootCA.key -CAcreateserial -out rhds2.crt -days 3650 -sha256
+  Signature ok
+  subject=C = IN, ST = Maharashtra, L = Pune, O = Bajaj Allianz PVT LTD, OU = IT, CN = L7SRL2RHDS02, emailAddress = admin2@balic.in
+  Getting CA Private Key
+  Enter pass phrase for rootCA.key:
+
+=== Copy the all certificates into system directory files Node1 RHDS for LDAPS secure search.
+
+
+ [ocpadm@L7SRL2RHDS01 certs]$  cp rootCA.crt /etc/openldap/certs/
+ [ocpadm@L7SRL2RHDS01 certs]$  cp rootCA.crt /etc/pki/ca-trust/source/anchors/
+
+=== Adding trusted root certificates to the server
+
+
+ [ocpadm@L7SRL2RHDS01 certs]$ sudo update-ca-trust extract
+
+Edit /etc/openldap/ldap.conf, add TLS_CACERT and TLS_CACERTDIR.
+
+ [ocpadm@L7SRL2RHDS01 certs]$  cat /etc/openldap/ldap.conf
+
+         ADD TLS certs directory
+           TLS_CACERT      /etc/openldap/certs/rootCA.crt
+           TLS_CACERTDIR   /etc/openldap/certs/
+      Comment the below line as we are not using kerbros
+           #SASL_NOCANON   on
+
+=== validate the certificates uploaded into system
+
+      [ocpadm@L7SRL2RHDS01 certs]$ openssl crl2pkcs7 -nocrl -certfile /etc/pki/tls/certs/ca-bundle.crt | openssl pkcs7 -print_certs | grep subject | head
+
+
+=== Copy the all certificates into system directory files Node2 RHDS
+
+
+  [ocpadm@L7SRL2RHDS02 certs]$  cp rootCA.crt /etc/openldap/certs/
+  [ocpadm@L7SRL2RHDS02 certs]$  cp rootCA.crt /etc/pki/ca-trust/source/anchors/
+
+=== Adding trusted root certificates to the server
+
+  [ocpadm@L7SRL2RHDS02 certs]$  update-ca-trust extract
+
+Edit /etc/openldap/ldap.conf, add TLS_CACERT and TLS_CACERTDIR.
+
+  [ocpadm@L7SRL2RHDS02 certs]$ cat /etc/openldap/ldap.conf
+            ADD TLS certs directory
+              TLS_CACERT      /etc/openldap/certs/rootCA.crt
+              TLS_CACERTDIR   /etc/openldap/certs/
+         Comment the below line as we are not using kerbros
+              #SASL_NOCANON   on
+
+=== validate the certificates uploaded into system
+
+ [ocpadm@L7SRL2RHDS02 certs]$ openssl crl2pkcs7 -nocrl -certfile /etc/pki/tls/certs/ca-bundle.crt | openssl pkcs7 -print_certs | grep subject | head
+
+
+=== Import Node1 RHDS certificates into NSS Database
+Import the server certificate into NSS databse for master-master replication over secure port.
+
+TIP: FOR NSS database server password use token from pin.txt file
+  [ocpadm@L7SRL2RHDS01 certs]$ cat  /etc/dirsrv/slapd-rhds/pin.txt
+      Token: sadsfgdsjhrebsncvhdshfsdf
+
+Import root certificte
+
+ [ocpadm@L7SRL2RHDS01 certs]$ certutil -d /etc/dirsrv/slapd-rhds/ -A -n "Root CA" -t "CT,," -i /home/rootCA.crt
+
+Import server certificte and key
+
+  [ocpadm@L7SRL2RHDS01 certs]$ dsctl RHDS tls import-server-key-cert rhds1.crt rhds1.key
+
+==== Verify the certificate uploaded successfully or Not Node1
+
+  [ocpadm@L7SRL2RHDS01 certs]$ openssl crl2pkcs7 -nocrl -certfile /etc/pki/tls/certs/ca-bundle.crt | openssl pkcs7 -print_certs | grep subject | head
+  subject=C = IN, ST = Maharastra, L = Mumbai, O = "Bajaj Allianz ", OU = IT, CN = L7SRL2RHDS01, emailAddress = admin@balic.in
+  subject=CN = ACCVRAIZ1, OU = PKIACCV, O = ACCV, C = ES
+  subject=C = ES, O = FNMT-RCM, OU = AC RAIZ FNMT-RCM
+  subject=C = IT, L = Milan, O = Actalis S.p.A./03358520967, CN = Actalis Authentication Root CA
+  subject=C = US, O = AffirmTrust, CN = AffirmTrust Commercial
+  subject=C = US, O = AffirmTrust, CN = AffirmTrust Networking
+  subject=C = US, O = AffirmTrust, CN = AffirmTrust Premium
+  subject=C = US, O = AffirmTrust, CN = AffirmTrust Premium ECC
+  subject=C = US, O = Amazon, CN = Amazon Root CA 1
+  subject=C = US, O = Amazon, CN = Amazon Root CA 2
+
+==== Verify the certificate uploaded successfully or Not Node2
+
+    [ocpadm@L7SRL2RHDS02 anchors]$ openssl crl2pkcs7 -nocrl -certfile /etc/pki/tls/certs/ca-bundle.crt | openssl pkcs7 -print_certs | grep subject | headsubject=C = IN, ST = Maharashtra, L = Pune, O = Bajaj Allianz Life Insurance Company Ltd., OU = IT, CN = rhdsextprod.bajajallianzlife.com, emailAddress = "admin@bajajallianzlife.com "
+    subject=CN = ACCVRAIZ1, OU = PKIACCV, O = ACCV, C = ES
+    subject=C = ES, O = FNMT-RCM, OU = AC RAIZ FNMT-RCM
+    subject=C = IT, L = Milan, O = Actalis S.p.A./03358520967, CN = Actalis Authentication Root CA
+    subject=C = US, O = AffirmTrust, CN = AffirmTrust Commercial
+    subject=C = US, O = AffirmTrust, CN = AffirmTrust Networking
+    subject=C = US, O = AffirmTrust, CN = AffirmTrust Premium
+    subject=C = US, O = AffirmTrust, CN = AffirmTrust Premium ECC
+    subject=C = US, O = Amazon, CN = Amazon Root CA 1
+    subject=C = US, O = Amazon, CN = Amazon Root CA 2
+
+
+==== Enable host entries in both VM
+
+    [ocpadm@L7SRL2RHDS02 ~]$ cat /etc/hosts
+    127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+    ::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+    172.*.*.*  L7SRL2RHDS01.bajajallianzlife.com
+
+    [ocpadm@L7SRL2RHDS01 ~]$ cat /etc/hosts
+    127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+    ::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+    172.*.*.* L7SRL2RHDS02.bajajallianzlife.com
+
+
+=== Enable secure port on RHDS instance Node1
+
+  [ocpadm@L7SRL2RHDS01 sslcert]$ sudo dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS01 config  replace nsslapd-securePort=636 nsslapd-security=on
+  Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS01:
+  Successfully replaced "nsslapd-securePort"
+  Successfully replaced "nsslapd-security"
+
+=== Enable RSA settings for tls secure connection.
+
+  [ocpadm@L7SRL2RHDS01 sslcert]$ sudo dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS01 security rsa
+  set --tls-allow-rsa-certificates on --nss-token "internal
+  (software)" --nss-cert-name "Server Cert"
+
+
+=== Restart directory server for latest changes
+
+ [ocpadm@L7SRL2RHDS01 sslcert]$systemctl restart dirsrv@rhds.service
+
+NOTE: rhds is instance name
+
+===  List the NSS databse certificates
+
+To get the list of imported certificates execute below command.
+
+  [ocpadm@L7SRL2RHDS01 sslcert]$ sudo dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS01 -W security certificate list
+  Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS01:
+  Certificate Name: Server-Cert
+  Subject DN: E=admin1@bajajallianzlife.com,CN=L7SRL2RHDS01.bajajallianzlife.com,OU=IT,O=Bajaj Allainz life Comapny,L=Pune,ST=Maharashtra,C=IN
+  Issuer DN: E="admin@bajajallianzlife.com ",CN=rhdsextprod.bajajallianzlife.com,OU=IT,O=Bajaj Allianz Life Insurance Company Ltd.,L=Pune,ST=Maharashtra,C=IN
+  Expires: 2031-03-24 07:02:41
+  Trust Flags: u,u,u
+
+NOTE: if output will appear your uploaded certificte name then ok otherwise there is something missing.
+
+=== Validate the server uploaded with all certificates
+
+ [ocpadm@L7SRL2RHDS01 sslcert]$openssl s_client --connect L7SRL2RDS01:636
+
+=== Import Node2 RHDS certificates into NSS Database
+
+Import the server certificate into NSS databse for master-master replication over secure port.
+
+TIP: FOR NSS database server password use token from pin.txt file
+  [ocpadm@L7SRL2RHDS02 sslcert]$cat  /etc/dirsrv/slapd-rhds/pin.txt
+      Token: sadsfgdsjhrebsncvhdshfsdf
+
+Import root certificte
+
+ [ocpadm@L7SRL2RHDS02 sslcert]$ certutil -d /etc/dirsrv/slapd-rhds/ -A -n "Root CA" -t "CT,," -i /home/rootCA.crt
+
+Import server certificte and key
+
+  [ocpadm@L7SRL2RHDS02 sslcert]$ dsctl RHDS tls import-server-key-cert rhds2.crt rhds2.key
+
+=== Enable secure port on RHDS instance
+
+  [ocpadm@L7SRL2RHDS02 sslcert]$  sudo dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS02 config  replace nsslapd-securePort=636 nsslapd-security=on
+  [sudo] password for ocpadm:
+  Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS02:
+  selinux is disabled, will not relabel ports or files.
+  Successfully replaced "nsslapd-securePort"
+  selinux is disabled, will not relabel ports or files.
+  Successfully replaced "nsslapd-security"
+
+=== Enable RSA settings for tls secure connection.
+
+    [ocpadm@L7SRL2RHDS02 sslcert]$ sudo dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS02 security rsa
+    set --tls-allow-rsa-certificates on --nss-token "internal
+    (software)" --nss-cert-name "Server Cert"
+
+=== Restart directory server for latest changes
+
+ [ocpadm@L7SRL2RHDS02 sslcert]$systemctl restart dirsrv@rhds.service
+
+NOTE: rhds is instance name
+
+
+=== List the NSS databse certificates
+
+To get the list of imported certificates execute below command.
+
+  [ocpadm@L7SRL2RHDS02 sslcert]$ sudo dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS02 -W security certificate list
+  Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS02:
+  Certificate Name: Server-Cert
+  Subject DN: E=admin2@bajajallianjlife.com,CN="L7SRL2RHDS02.bajajallianzlife.com ",OU=IT,O=Bajaj Allianz Life Company,L=Pune,ST=Maharashtra,C=IN
+  Issuer DN: E="admin@bajajallianzlife.com ",CN=rhdsextprod.bajajallianzlife.com,OU=IT,O=Bajaj Allianz Life Insurance Company Ltd.,L=Pune,ST=Maharashtra,C=IN
+  Expires: 2031-03-24 06:58:41
+  Trust Flags: u,u,u
+
+=== Validate the server uploaded with all certificates using openssl s_client
+
+ [ocpadm@L7SRL2RHDS02 sslcert]$openssl s_client --connect L7SRL2RDS02:636
+
+=== Validate the ldap is searching with tls certificates
+
+ [ocpadm@L7SRL2RHDS02 sslcert]$ldapsearch -D "cn=rhdsadmin" -b "dc=rhdsextprod,dc=bajajallianzlife,dc=com" ldaps://L7SRL2RDS02:636 -w12345678 -ZZ
+     # extended LDIF
+     # LDAPv3
+     # base <dc=rhdsextprod,dc=bajajallianzlife,dc=com> with scope subtree
+     # filter: (objectclass=all)
+     # requesting: ldaps://L7SRL2RDS02:636
+     #
+     # example.in
+     dn: dc=rhdsextprod,dc=bajajallianzlife,dc=com
+     # people, example.in
+     dn: ou=people,dc=rhdsextprod,dc=bajajallianzlife,dc=com
+     # search result
+     search: 3
+     result: 0 Success
+     # numResponses: 3
+    # numEntries: 2
+
+
+TIP: for debug mode search with -d option
+ $ldapsearch -D "cn=rhdsadmin" -b "dc=rhdsextprod,dc=bajajallianzlife,dc=com" ldaps://L7SRL2RDS02:636 -w12345678 -ZZ -d 1
+
+
+=== Create cluster configuration for master-master replication
+
+==== On Master 2 RHDS
+
+
+Enable replication for the suffix, and create the replication manager account:
+
+ [ocpadm@L7SRL2RHDS02 sslcert]$dsconf -D "cn=rhdsadmin" -w "*********" ldap://L7SRL2RDS02 replication enable --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" --role="master" --replica-id=201 --bind-dn="cn=replication manager,cn=config" --bind-passwd="******"
+
+=== On Master 1 RHDS
+
+
+Create Replication User and Replica-ID
+
+  [ocpadm@L7SRL2RHDS01 sslcert]$dsconf -D "cn=rhdsadmin" -w "******" ldap://L7SRL2RDS01 replication enable --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" --role="master" --replica-id=202 --bind-dn="cn=replication manager,cn=config" --bind-passwd="******"
+
+Create Replication Agreement on MASTER 1
+
+  ocpadm@L7SRL2RHDS01 RHDS_1]$ sudo dsconf -D "cn=rhdsadmin" -w "*******" ldap://L7SRL2RHDS02 repl-agmt create --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" --host="L7SRL2RHDS01.bajajallianzlife.com" --port=636 --conn-protocol=LDAPS --bind-dn="cn=replication manager,cn=config" --bind-passwd="*******" --bind-method=SIMPLE --init repl-agreement-master2-to-master1
+  Successfully created replication agreement "repl-agreement-master2-to-master1"
+  Agreement initialization started...
+
+
+Verify replication
+
+  [ocpadm@L7SRL2RHDS01 RHDS_1]$ sudo dsconf -D "cn=rhdsadmin" -w "*******" ldap://L7SRL2RHDS02  repl-agmt init-status --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" repl-agreement-master2-to-master1Agreement successfully initialized.
+
+=== Create replication agreement on Master 2
+
+[ocpadm@L7SRL2RHDS02 ~]$ dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS01.bajajallianzlife.com:636 replication enable --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" --role="master" --replica-id=101 --bind-dn="cn=replication manager,cn=config" --bind-passwd="*******"
+Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS01.bajajallianzlife.com:636:
+Replication successfully enabled for "dc=rhdsextprod,dc=bajajallianzlife,dc=com"
+
+
+
+Verify replication
+
+
+  [ocpadm@L7SRL2RHDS02 ~]$ dsconf -D "cn=rhdsadmin" ldap://L7SRL2RHDS02.bajajallianzlife.com:636 replication enable --suffix="dc=rhdsextprod,dc=bajajallianzlife,dc=com" --role="master" --replica-id=102 --bind-dn="cn=replication manager,cn=config" --bind-passwd="*****"
+  Enter password for cn=rhdsadmin on ldap://L7SRL2RHDS02.bajajallianzlife.com:636:
+  Replication successfully enabled for "dc=rhdsextprod,dc=bajajallianzlife,dc=com"
+
+=== Verify Replication in RHDS on Webconsole
+
+NOTE: Last init status initialized will show one time till then you will not restart the server. After restart it will show this message Not initialized. Replication will still work properly you can ignore this message.
+
+=== Add some user and groups to validate Replication
+
+create OU in RHDS
+
+ $cat addou.ldif
+    dn: ou=People,dc=rhdsextprod,dc=bajajallianzlife,dc=com
+    objectClass: organizationalUnit
+    ou: People
+    dn: ou=groups,dc=rhdsextprod,dc=bajajallianzlife,dc=com
+    objectClass: organizationalUnit
+    ou: groups
+    dn: cn=eng,ou=groups,dc=rhdsextprod,dc=bajajallianzlife,dc=com
+    objectClass: groups
+    cn: eng
+
+
+ $cat adduser.ldif
+    dn: uid=user-dev1,ou=People,dc=rhdsextprod,dc=bajajallianzlife,dc=com
+    objectClass: inetuser
+    objectClass: organizationalPerson
+    objectClass: person
+    objectClass: top
+    cn: user-dev1
+    sn: user-dev1
+    uid: user-dev1
+    memberof: cn=eng,ou=Groups,dc=rhdsextprod,dc=bajajallianzlife,dc=com
+
+== 3Scale API authentication with RHSSO.
+3scale can synchronize client credentials between 3scale (Application credentials) and a Red Hat Single Sign-On server using OpenID Connect (OIDC). 3scale utilizes a service called Zync to synchronize calls to the Red Hat Single Sign-On server.
+
+=== Create 3scale client in RHSSO
+
+1). Create client in rhsso for 3scale authentication.
+
+ Client Name: 3scale-sso
+ CLient protocol: open-id connect
+ Access Type: confidential
+ Service Accounts Enabled: ON
+ Authorization Enabled: ON
+
+image::3scale-auth.png[]
+
+2) Assign management role to clients.
+
+ Client roles: relam-management
+ Assign Role: manage-clients
+
+image::3scale-role.JPG[]
+
+3) Copy the client credentials
+
+image::3scale-credentials.JPG[]
+
+==== Edit SSO service for communication between the RH SSO and 3Scale
+
+  oc edit svc sso -n rhsso-prod
+
+[source,yaml]
+----
+spec:
+  ports:
+  - name: router-port
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  - name: ocp-port
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    deploymentConfig: sso
+----
+
+==== Configure 3scale
+
+To configure 3scale, take the following steps:
+
+Verify the API.
+
+image::3scale-5.JPG[]
+
+Enable OpenID Connect.
+
+image::3scale-6.JPG[]
+
+Under the Authentication Settings heading, in the OpenID Connect Issuer field, enter the previously copied client credentials  from 3scale-sso with the URL of Red Hat Single Sign-On server.
+
+https://3scale-auth:abc4rhs-56gs-4hsku-jok23@sso.rhsso-prod.svc.cluster.local:8080/auth/realms/internal
+
+NOTE: URL format will be https://RHSSO_client_name:secret@rhsso_service_url:8080/auth/relams/relam_name
+
+image::3scale-7.JPG[]
+
+Select OIDC authorization flow
+
+* Check Authorization flow
+* Check Service accounts
+
+image::3scale-7.JPG[]
+
+Enable Credentials locations
+
+* Check As query parameters (GET) or body parameters (POST/PUT/DELETE)
+
+image::3scale-8.JPG[]
+
+Authentication Failed error
+Customized the error description
+
+image::3scale-9.JPG[]
+
+Authentication Missing Error
+
+image::3scale-10.JPG[]
+
+Usage Limit Exceed Error
+
+image::3scale-11.JPG[]
+image::3scale-12.JPG[]
+
+
+Select the service on which you want to enable the OpenID Connect authentication (in this setup Approval_Product API has been used), navigate to settings > Integration > Configuration.
+
+image::3scale-13.JPG[]
+
+To save the configuration, click Update the Staging Environment.
+
+image::3scale-14.JPG[]
+
+To save the configuration, click Update the Production Environment.
+
+image::3scale-15.JPG[]
+
+Add API Credentials
+Edit redirect URL and add 3scale staging url click on 3Scale App.
+
+image::3scale-16.JPG[]
+
+image::3scale-redirect-url.PNG[]
+
+Verify the client is added or not.
+
+image::3scale-client.PNG[]
+
+
+
+==== Test the 3scale API with RHSSO.
+
+Request to access the token from RHSSO
+
+  $curl -X POST -H "Content-Type: application/x-www-form-urlencoded" -H "Accept:application/json" -d "grant_type=client_credentials&redirect_uri=http://sso.rhsso-prod.svc.cluster.local:8080/auth/realms/internal/protocol/openid-connect/auth&client_id=E53c2eb8&client_secret=61790611d3fe29a4bc028e74cbe7f9b8" http://sso.rhsso-prod.svc.cluster.local:8080/auth/realms/internal/protocol/openid-connect/token
+
+
+Curl response
+
+ {"access_token":"qMkdY.................","token_type":"bearer","not-before-policy":0,"session_state":"08bc2756-3f9b-4403-bdc6-b1ff2c531d89","scope":"email profile"}
+
+
+Request to 3 scale API with SSO token. Copy the access token and hit the application with 3scale API staging URL.
+
+ $curl -kv -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJRYzFyamlBUGVvSGpXbl8xX21JMGFSWUZxeXhRODJmTGd6U2hxUGFhS3HQELHJ7nif56DBlF1uxh_-vlaag" https://approval-product-3scale-apicast-production.apis.apps.ocplife.bajajallianz.com:443/?app_id=e53c2eb8&app_key=61790611d3fe29a4bc028e74cbe7f9b8
+ Trying 172.20.33.202...
+ * TCP_NODELAY set
+ * Connected to approval-product-3scale-apicast-production.apis.apps.ocplife.bajajallianz.com (172.20.33.202) port 443 (#0)
+ * ALPN, offering h2
+ * ALPN, offering http/1.1
+ * successfully set certificate verify locations:
+ *   CAfile: /etc/pki/tls/certs/ca-bundle.crt
+   CApath: none
+ * TLSv1.3 (OUT), TLS handshake, Client hello (1):
+ * TLSv1.3 (IN), TLS handshake, Server hello (2):
+ * TLSv1.3 (IN), TLS handshake, [no content] (0):
+ * TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+ * TLSv1.3 (IN), TLS handshake, [no content] (0):
+ * TLSv1.3 (IN), TLS handshake, Certificate (11):
+ * TLSv1.3 (IN), TLS handshake, [no content] (0):
+ * TLSv1.3 (IN), TLS handshake, CERT verify (15):
+ * TLSv1.3 (IN), TLS handshake, [no content] (0):
+ * TLSv1.3 (IN), TLS handshake, Finished (20):
+ * TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+ * TLSv1.3 (OUT), TLS handshake, [no content] (0):
+ * TLSv1.3 (OUT), TLS handshake, Finished (20):
+ * SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
+ * ALPN, server did not agree to a protocol
+ * Server certificate:
+ *  subject: CN=*.apps.ocplife.bajajallianz.com
+ *  start date: Aug 11 14:46:46 2020 GMT
+ *  expire date: Aug 11 14:46:47 2022 GMT
+ *  issuer: CN=ingress-operator@1597157207
+ *  SSL certificate verify result: self signed certificate in certificate chain (19), continuing anyway.
+ * TLSv1.3 (OUT), TLS app data, [no content] (0):
+ > GET /?app_id=e53c2eb8 HTTP/1.1
+ > Host: approval-product-3scale-apicast-production.apis.apps.ocplife.bajajallianz.com
+ > User-Agent: curl/7.61.1
+ > Accept: */*
+ > Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJRYzFyamlBUGVvSGpXbl8xX21JMGFSWUZxeXhRODJmTGd6U2hxUGFlX1dJIn0.eyJleHAiOjE2MTc2MTUyODEsImlhdCI6MTYxNzYxNDk4MSwianRpIjoiOTBjYzUwMGYtN2Q0Mi00YmExLTg5YzgtMDc4NTY3YzUyMDZiIiwiaXNzIjoiaHR0cDovL3Nzby5yaHNzby1wcm9kLnN2Yy5jbHVzdGVyLmxvY2FsOjgwODAvYXV0aC9yZWFsbXMvaW50ZXJuYWwiLCJhdWQiOiJhY2NvdW50Iiwic3ViIjoiNTMyZmJiZGYtMjViOS00NWQ1LThkYWYtZTQxYmZjNGE2NWU1IiwidHlwIjoiQmVhcmVyIiwiYXpwIjoiZTUzYzJlYjgiLCJhY3IiOiIxIiwiYWxsb3dlZC1vcmlnaW5zIjpbImh0dHBzOi8vYXBwcm92YWwtcHJvZHVjdC0zc2NhbGUtYXBpY2FzdC1wcm9kdWN0aW9uLmFwaXMuYXBwcy5vY3BsaWZlLmJhamFqYWxsaWFuei5jb206NDQzIl0sInJlYWxtX2FjY2VzcyI6eyJyb2xlcyI6WyJvZmZsaW5lX2FjY2VzcyIsInVtYV9hdXRob3JpemF0aW9uIl19LCJyZXNvdXJjZV9hY2Nlc3MiOnsiYWNjb3VudCI6eyJyb2xlcyI6WyJtYW5hZ2UtYWNjb3VudCIsIm1hbmFnZS1hY2NvdW50LWxpbmtzIiwidmlldy1wcm9maWxlIl19fSwic2NvcGUiOiJwcm9maWxlIGVtYWlsIiwiY2xpZW50SWQiOiJlNTNjMmViOCIsImVtYWlsX3ZlcmlmaWVkIjpmYWxzZSwiY2xpZW50SG9zdCI6IjEwLjEyOC40LjUxIiwicHJlZmVycmVkX3VzZXJuYW1lIjoic2VydmljZS1hY2NvdW50LWU1M2MyZWI4IiwiY2xpZW50QWRkcmVzcyI6IjEwLjEyOC40LjUxIn0.eOCXi_9v7xauZyWjRlDkOC5yfNc5hvtlA4tGcAB4tosojtfP2Btn_v7uN4cvPqU1qF3EiagUP0a_bzBQtZnv9vyPAHhJ9lYgTPysmyPVRsWs8sXCYHOyLi_UdH5li5MN2lkHGjr9qy40XCgKaFp5CpE0muRaM1n9oPBciQCg6Z5w9WocAvRqtO1t1FJ-QOACNq3pPnpFENiN_GioJ0T9_R3ndrbscfOx2VBZzC5us8WR3e35n5a_jVTfcEcPu0DFbHeWB0aDOuqQchf5jCZ8EcLXRDsrzl36HaaMfvcHE3IcF3J_ufykw_yRhS3HQELHJ7nif56DBlF1uxh_-vlaag
+ >
+ * TLSv1.3 (IN), TLS handshake, [no content] (0):
+ * TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+ * TLSv1.3 (IN), TLS handshake, [no content] (0):
+ * TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+ * TLSv1.3 (IN), TLS app data, [no content] (0):
+ < HTTP/1.1 404
+ < Server: openresty
+ < Date: Mon, 05 Apr 2021 09:33:18 GMT
+ < Content-Type: application/json
+ < Transfer-Encoding: chunked
+ < Vary: Origin
+ < Vary: Access-Control-Request-Method
+ < Vary: Access-Control-Request-Headers
+ < Set-Cookie: fdaa23575572a946526fedf62feecd3e=b336291eb0c2cbf76de7fe81dc06ebe0; path=/; HttpOnly
+ < Cache-control: private
+ < Set-Cookie: d0ec613d42ca51ac9be1a3a989098ad9=45c54bfc5a717d7fbaef0365e3bfb3a3; path=/; HttpOnly; Secure; SameSite=None
+ <
+ * Connection #0 to host approval-product-3scale-apicast-production.apis.apps.ocplife.bajajallianz.com left intact
+ {"timestamp":"2021-04-05T09:33:18.728+0000","status":404,"error":"Not Found","message":"No message available","path":"/"}
+ [1]+  Done                    curl -kv -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJRYzFyamlBUGVvSGpXbl8xX21JMGFSWUZxeXhRODJmTGd6U2hxUGFlX15MN2lkHGjr9qy40XCgKaFp5CpE0muRaM1n9oPBciQCg6Z5w9WocAvRqtO1t1FJ-QOACNq3pPnpFENiN_GioJ0T9_R3ndrbscfOx2VBZzC5us8WR3e35n5a_jVTfcEcPu0DFbHeWB0aDOuqQchf5jCZ8EcLXRDsrzl36HaaMfvcHE3IcF3J_ufykw_yRhS3HQELHJ7nif56DBlF1uxh_-vlaag" https://approval-product-3scale-apicast-production.apis.apps.ocplife.bajajallianz.com:443/?app_id=e53c2eb8
